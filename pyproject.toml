@@ -1,7 +1,7 @@
 [project]
-name = "green-agent-template"
+name = "smartmem-green-agent"
 version = "0.1.0"
-description = "A template for A2A green agents"
+description = "green agent of smartmem benchmark"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
