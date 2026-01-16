@@ -50,7 +50,24 @@ jobs:
         run: |
           echo "$SECRETS_JSON" | jq -r 'to_entries[] | "\(.key)=\(.value)"' > .env
           docker run -d -p 9009:9009 --name agent-container --env-file .env $(echo "${{ steps.meta.outputs.tags }}" | head -n1) --host 0.0.0.0 --port 9009
-          timeout 30 bash -c 'until curl -sf http://localhost:9009/.well-known/agent-card.json > /dev/null; do sleep 1; done'
+          echo "Waiting for agent to start..."
+          for i in {1..60}; do
+            if curl -sf http://localhost:9009/.well-known/agent.json > /dev/null 2>&1; then
+              echo "Agent is ready!"
+              exit 0
+            fi
+            echo "Attempt $i/60: Agent not ready yet..."
+            sleep 2
+            # Show container logs on every 10th attempt
+            if [ $((i % 10)) -eq 0 ]; then
+              echo "=== Container logs so far ==="
+              docker logs agent-container 2>&1 | tail -20
+            fi
+          done
+          echo "=== Final container logs ==="
+          docker logs agent-container 2>&1
+          echo "Agent failed to start within 120 seconds"
+          exit 1
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v4
