@@ -1,3 +1,4 @@
+import os
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
 from a2a.server.tasks import TaskUpdater
@@ -27,6 +28,8 @@ TERMINAL_STATES = {
 class Executor(AgentExecutor):
     def __init__(self):
         self.agents: dict[str, Agent] = {} # context_id to agent instance
+        # Check if we should use static test cases (for testing/CI)
+        self._use_static = os.getenv("USE_STATIC_TESTS", "").lower() in ("true", "1", "yes")
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         msg = context.message
@@ -44,7 +47,7 @@ class Executor(AgentExecutor):
         context_id = task.context_id
         agent = self.agents.get(context_id)
         if not agent:
-            agent = Agent()
+            agent = Agent(use_static=self._use_static)
             self.agents[context_id] = agent
 
         updater = TaskUpdater(event_queue, task.id, context_id)

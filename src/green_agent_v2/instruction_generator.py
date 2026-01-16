@@ -121,15 +121,94 @@ class LLMCaseGenerator:
             return None
 
 
+# Static test cases for testing without LLM API calls
+STATIC_TEST_CASES = [
+    {
+        "scenario_id": "static_precision_easy_001",
+        "difficulty": "easy", 
+        "dimension": "precision",
+        "description": "Turn on the living room light",
+        "initial_state": {"living_room_light": "off", "living_room_brightness": 50},
+        "turns": [{
+            "turn_id": 1,
+            "gm_instruction": "Please turn on the living room light.",
+            "expected_agent_action": [{"action": "update", "key": "living_room_light", "value": "on"}],
+            "expected_final_state": {"living_room_light": "on", "living_room_brightness": 50}
+        }]
+    },
+    {
+        "scenario_id": "static_memory_medium_001",
+        "difficulty": "medium",
+        "dimension": "memory",
+        "description": "Remember and recall a preference",
+        "initial_state": {"bedroom_temperature": 22, "bedroom_ac": "off"},
+        "turns": [
+            {
+                "turn_id": 1,
+                "gm_instruction": "I prefer the bedroom temperature at 25 degrees.",
+                "expected_agent_action": [{"action": "update", "key": "bedroom_temperature", "value": 25}],
+                "expected_final_state": {"bedroom_temperature": 25, "bedroom_ac": "off"}
+            },
+            {
+                "turn_id": 2, 
+                "gm_instruction": "Set the bedroom to my preferred temperature.",
+                "expected_agent_action": [{"action": "update", "key": "bedroom_temperature", "value": 25}],
+                "expected_final_state": {"bedroom_temperature": 25, "bedroom_ac": "off"}
+            }
+        ]
+    },
+    {
+        "scenario_id": "static_conflict_easy_001",
+        "difficulty": "easy",
+        "dimension": "conflict",
+        "description": "Handle conflicting instructions",
+        "initial_state": {"kitchen_light": "off"},
+        "turns": [{
+            "turn_id": 1,
+            "gm_instruction": "Turn on the kitchen light, but actually keep it off.",
+            "expected_agent_action": [],
+            "expected_final_state": {"kitchen_light": "off"}
+        }]
+    },
+    {
+        "scenario_id": "static_ambiguous_easy_001",
+        "difficulty": "easy",
+        "dimension": "ambiguous",
+        "description": "Handle ambiguous instruction",
+        "initial_state": {"living_room_light": "off", "bedroom_light": "off"},
+        "turns": [{
+            "turn_id": 1,
+            "gm_instruction": "Turn on the light.",
+            "expected_agent_action": [{"action": "update", "key": "living_room_light", "value": "on"}],
+            "expected_final_state": {"living_room_light": "on", "bedroom_light": "off"}
+        }]
+    },
+    {
+        "scenario_id": "static_noise_easy_001",
+        "difficulty": "easy",
+        "dimension": "noise",
+        "description": "Filter noise from instructions",
+        "initial_state": {"tv": "off"},
+        "turns": [{
+            "turn_id": 1,
+            "gm_instruction": "Um, could you please, like, turn on the TV? Thanks!",
+            "expected_agent_action": [{"action": "update", "key": "tv", "value": "on"}],
+            "expected_final_state": {"tv": "on"}
+        }]
+    }
+]
+
+
 class AdaptiveGenerator:
     """
     Adaptive strategy for generating test cases based on weaknesses or initial setup.
     """
     
-    def __init__(self):
+    def __init__(self, use_static: bool = False):
         # Lazy initialization - don't create LLMCaseGenerator until needed
         # This allows smoke tests to pass without API keys
         self._case_generator = None
+        self._use_static = use_static
     
     @property
     def case_generator(self) -> LLMCaseGenerator:
@@ -147,11 +226,21 @@ class AdaptiveGenerator:
         """
         Generates test cases targeted at identified weaknesses.
         
+        If use_static=True, returns filtered static test cases.
+        
         Args:
             weaknesses: List of (type, name, score) tuples.
             count_per_weakness: Number of cases to generate per weakness.
             difficulty_boost: Whether to progressively increase difficulty.
         """
+        # Use static test cases if configured
+        if self._use_static:
+            # Filter static cases by weakness dimensions
+            weakness_dims = {w[1] for w in weaknesses if w[0] == 'dimension'}
+            filtered = [c for c in STATIC_TEST_CASES if c.get('dimension') in weakness_dims]
+            print(f"  🎯 Using STATIC targeted cases ({len(filtered)} cases for {weakness_dims})")
+            return filtered[:count_per_weakness * len(weaknesses)] if filtered else STATIC_TEST_CASES[:2]
+        
         generated = []
         
         for weakness_type, weakness_name, weakness_score in weaknesses:
@@ -203,10 +292,18 @@ class AdaptiveGenerator:
         """
         Generates a fixed set of test cases using a pyramid distribution.
         
+        If use_static=True, returns predefined static test cases (for testing/CI).
+        Otherwise, uses LLM to generate test cases.
+        
         Hardcoded Strategy (6 cases per dimension):
         - Dimensions: ["precision", "ambiguous", "conflict", "memory", "noise"]
         - Distribution: 3 Easy, 2 Medium, 1 Difficult
         """
+        # Use static test cases if configured
+        if self._use_static:
+            print(f"  ▲ Using STATIC test cases ({len(STATIC_TEST_CASES)} cases)")
+            return STATIC_TEST_CASES.copy()
+        
         generated = []
         
         dimensions = ["precision", "ambiguous", "conflict", "memory", "noise"]
