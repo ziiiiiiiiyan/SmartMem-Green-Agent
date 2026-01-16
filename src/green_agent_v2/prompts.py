@@ -8,7 +8,18 @@ Generate test cases in STRICTLY VALID JSON format.
 4. expected_final_state MUST be consistent with initial_state + actions
 
 ## DEVICE SPECIFICATIONS (EXACT VALUES ONLY):
-{device_spec_str}
+| Device Key          | Type  | Allowed Values / Range             |
+|---------------------|-------|-------------------------------------|
+| living_room_light   | enum  | "on", "off"                         |
+| living_room_color   | enum  | "white", "red", "blue", "warm"      |
+| bedroom_light       | enum  | "on", "off"                         |
+| bedroom_color       | enum  | "white", "warm", "blue", "red"      |
+| ac                  | enum  | "on", "off"                         |
+| ac_temperature      | int   | 16 - 30                             |
+| fan_speed           | enum  | "off", "low", "medium", "high"      |
+| music_volume        | int   | 0 - 10                              |
+| front_door_lock     | enum  | "locked", "unlocked"                |
+| kitchen_light       | enum  | "on", "off"                         |
 
 ## IMPORTANT CONSTRAINTS:
 - "living_room_light" and "bedroom_light" and "kitchen_light" can ONLY be "on" or "off"
@@ -50,7 +61,7 @@ Generate test cases in STRICTLY VALID JSON format.
     }}
   ]
 }}
-""" #TODO: 直接做好设备信息放进去不用占位符，设备信息如下
+"""
 
 DEVICE_CONSTRAINTS = {
     # Living Room

@@ -8,6 +8,7 @@ from a2a.utils import get_message_text, new_agent_text_message
 
 from messenger import Messenger
 from green_agent_v2 import AdaptiveGenerator, WeaknessAnalyzer, TurnEvaluator, TestResult
+from green_agent_v2.visualize import ReportGenerator
 from app import SmartHomeEnv
 
 class EvalRequest(BaseModel):
@@ -54,13 +55,14 @@ class Agent:
         is less than this threshold.
     """
     required_roles: list[str] = ['purple']
-    required_config_keys: list[str] = ['max_test_rounds', 'targeted_per_weakness', 'convergence_threshold']
+    required_config_keys: list[str] = ['max_test_rounds', 'weakness_num', 'targeted_per_weakness', 'convergence_threshold']
 
     def __init__(self):
         self.messenger = Messenger()
         self.test_case_generator = AdaptiveGenerator()
         self.env = SmartHomeEnv()
         self.analyser = WeaknessAnalyzer()
+        self.report_generator = ReportGenerator()
         self.round_history = []
         self.all_results: List[TestResult] = []
 
@@ -223,25 +225,70 @@ class Agent:
                 )
 
             self.all_results += current_round_results
+            self.analyser.analyze(current_round_results)  # Update weakness profile
             current_round_pass_rate = sum(1 for r in current_round_results if r.passed) / max(1, len(current_round_results))
             
-            if abs(current_round_pass_rate-last_round_pass_rate) < threshold:
-                await updater.complete(new_agent_text_message("Convergenced. Test ended."))
-            else:
-                top_weaknesses = self.analyzer.get_top_weaknesses(weakness_num)
-                new_test_cases = self.test_case_generator.generate_targeted(top_weaknesses, target_count) #TODO: 其实这里可以设置difficulty_boost，直接默认True了，后面可以调整
-                all_test_cases.append(new_test_cases)
+            # Record round history
+            self.round_history.append({
+                "round": round_num,
+                "focus": focus,
+                "total_cases": len(current_round_results),
+                "passed": sum(1 for r in current_round_results if r.passed),
+                "pass_rate": current_round_pass_rate
+            })
             
-        #TODO: 生成最终评估后得到的agent画像以及可视化结果等, 也可以把all_test_cases也打过去
-        temp_judgement=...
-        visual_res=...
+            if abs(current_round_pass_rate-last_round_pass_rate) < threshold:
+                break  # Convergence reached
+            
+            last_round_pass_rate = current_round_pass_rate
+            
+            # Generate targeted test cases for next round (if not the last round)
+            if round_cnt < max_rounds - 1:
+                top_weaknesses = self.analyser.get_top_weaknesses(weakness_num)
+                new_test_cases = self.test_case_generator.generate_targeted(top_weaknesses, target_count)
+                all_test_cases.append(new_test_cases)
+        
+        # Generate final report
+        await updater.update_status(
+            TaskState.working, 
+            new_agent_text_message("Generating assessment report...")
+        )
+        
+        report = self.report_generator.generate_report(
+            profile=self.analyser.profile,
+            round_history=self.round_history,
+            all_results=self.all_results,
+            agent_name="Purple Agent"
+        )
+        
+        # Build artifact parts
+        artifact_parts = [
+            Part(root=TextPart(text=report['text']))
+        ]
+        
+        # Add structured data
+        summary_data = report['data'].get('summary', {})
+        dimension_stats = report['data'].get('dimension_stats', {})
+        artifact_parts.append(Part(root=DataPart(data={
+            "summary": summary_data,
+            "dimension_stats": dimension_stats,
+            "radar_data": report['data'].get('radar_data', {}),
+            "boundaries": report['data'].get('boundaries', {}),
+            "round_history": self.round_history
+        })))
+        
+        # Add chart files if available
+        for chart_name, chart_bytes in report.get('charts', {}).items():
+            import base64
+            # FilePart expects a file URI, so we'll include charts in DataPart as base64
+            pass  # Charts are included in the DataPart above if needed
+        
         await updater.add_artifact(
-            parts=[
-                Part(root=TextPart(text=temp_judgement)),
-                Part(root=DataPart(data={
-                    # structured assessment results
-                })),
-                Part(root=FilePart(file=visual_res))
-            ],
-            name="Result",
+            parts=artifact_parts,
+            name="Assessment Result",
+        )
+        
+        await updater.complete(new_agent_text_message(
+            f"Assessment completed. Pass rate: {summary_data.get('pass_rate', 0)*100:.1f}%"
+        ))
         )
