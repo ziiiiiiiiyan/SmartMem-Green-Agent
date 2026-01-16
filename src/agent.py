@@ -1,5 +1,6 @@
 import json
-from json_repair import repair_json
+# from json_repair import repair_json
+import json_repair
 from typing import Any, List, Dict
 from pydantic import BaseModel, HttpUrl, ValidationError
 from a2a.server.tasks import TaskUpdater
@@ -184,7 +185,7 @@ class Agent:
                         is_new_conversation = False 
 
                         try:
-                            parsed_actions = repair_json(agent_reply, return_objects=True)
+                            parsed_actions = json_repair(agent_reply, return_objects=True)
                         except Exception:
                             parsed_actions = None
 
@@ -216,7 +217,7 @@ class Agent:
                         }
                     )
                     if turn_res.get('details', {}).get('errors'):
-                        test_case_all_errors.extend(result['details']['errors'])
+                        test_case_all_errors.extend(turn_res['details']['errors'])
                     
                 test_case_final_score = test_case_total_score / max(1, test_case_max_score)
                 ifthistc_passed = test_case_final_score >= 1.0
