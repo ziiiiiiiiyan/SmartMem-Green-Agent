@@ -89,14 +89,21 @@ class Agent:
         """
         input_text = get_message_text(message)
 
+        # Try to parse as EvalRequest (from AgentBeats platform)
         try:
             request: EvalRequest = EvalRequest.model_validate_json(input_text)
             ok, msg = self.validate_request(request)
             if not ok:
-                await updater.reject(new_agent_text_message(msg))
+                await updater.complete(new_agent_text_message(f"Request validation failed: {msg}"))
                 return
-        except ValidationError as e:
-            await updater.reject(new_agent_text_message(f"Invalid request: {e}"))
+        except ValidationError:
+            # Not a valid EvalRequest - this is a regular message (e.g., smoke test)
+            # Return a friendly response for A2A protocol compliance
+            await updater.complete(new_agent_text_message(
+                "Hello! I'm the SmartMem Green Agent. "
+                "I evaluate Purple Agents on smart home memory tasks. "
+                "Send me an EvalRequest JSON with 'participants' and 'config' to start an evaluation."
+            ))
             return
 
         purple_addr = request.participants['purple']
