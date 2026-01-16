@@ -184,7 +184,7 @@ class Agent:
                         is_new_conversation = False 
 
                         try:
-                            parsed_actions = repair_json.loads(agent_reply)
+                            parsed_actions = repair_json(agent_reply, return_objects=True)
                         except Exception:
                             parsed_actions = None
 

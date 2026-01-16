@@ -46,7 +46,7 @@ class LLMCaseGenerator:
 
         gen_args_str = os.getenv("MODEL_GEN_ARGS", '{}')
         try:
-            self.model_gen_args = repair_json.loads(gen_args_str)
+            self.model_gen_args = repair_json(gen_args_str, return_objects=True)
         except json.JSONDecodeError as e:
             logger.warning(f"Failed to parse MODEL_GEN_ARGS from .env: {e}. Using empty dict.")
             self.model_gen_args = {}
@@ -98,7 +98,7 @@ class LLMCaseGenerator:
                 
             # Parse the JSON response using repair_json
             try:
-                case_data = repair_json.loads(content)
+                case_data = repair_json(content, return_objects=True)
             except Exception as e:
                 logger.error(f"JSON parsing failed. Content snippet: {content[:100]}... Error: {e}")
                 return None
