@@ -1,5 +1,6 @@
 import json
 import json_repair
+import logging
 from typing import Any, List, Dict
 from pydantic import BaseModel, HttpUrl, ValidationError
 from a2a.server.tasks import TaskUpdater
@@ -10,6 +11,9 @@ from messenger import Messenger
 from green_agent_v2 import AdaptiveGenerator, WeaknessAnalyzer, TurnEvaluator, TestResult
 from green_agent_v2.visualize import ReportGenerator
 from app import SmartHomeEnv
+
+logger = logging.getLogger("smartmem_green_agent")
+logger.setLevel(logging.INFO)
 
 class EvalRequest(BaseModel):
     """Request format sent by the AgentBeats platform to green agents."""
@@ -35,7 +39,7 @@ class Agent:
     Required configurations in `scenario.toml`:
 
     - max_test_rounds (int): 
-        Specifies the maximum number of testing iterations. 一个test round包含n个test case，test case的数量 = weakness_num * targeted_per_weakness
+        Specifies the maximum number of testing iterations. One test round includes n test case. The number of test case = weakness_num * targeted_per_weakness
         Round 1 uses the default pyramid distribution. For the remaining (max_test_rounds - 1) 
         rounds, questions are dynamically generated based on the top `weakness_num` 
         weaknesses and `targeted_per_weakness`.
@@ -146,13 +150,14 @@ class Agent:
             round_num = round_cnt + 1
             focus = "General Pyramid" if round_cnt == 0 else "Weakness Targeted"
             
-            await updater.update_status(
-                TaskState.working, 
-                new_agent_text_message(f"Round {round_num}/{max_rounds}: Testing ({focus})...")
-            )
+            # await updater.update_status(
+            #     TaskState.working, 
+            #     new_agent_text_message(f"Round {round_num}/{max_rounds}: Testing ({focus})...")
+            # ) # 这个消息会被发给purple, 错误的
+            logger.info(f"Round {round_num}/{max_rounds}: Testing ({focus})...")
             
             current_round_results: List[TestResult] = []
-            for test_case in new_test_cases:
+            for i, test_case in enumerate(new_test_cases):
                 self.env.reset_turn_history()
                 self.env.reset(initial_state=test_case['initial_state'])
                 is_new_conversation = True
@@ -180,6 +185,7 @@ class Agent:
                     evaluator = TurnEvaluator(expected_actions=expected_actions, expected_final_state=expected_state)
                     # Interaction Loop
                     current_input = instruction
+                    logger.info(f"Test Case {i} / Turn {turn_id}: {instruction}")
                     while True:
                         agent_reply = await self.messenger.talk_to_agent(
                             message=current_input, 
@@ -261,10 +267,11 @@ class Agent:
                 all_test_cases.append(new_test_cases)
         
         # Generate final report
-        await updater.update_status(
-            TaskState.working, 
-            new_agent_text_message("Generating assessment report...")
-        )
+        # await updater.update_status(
+        #     TaskState.working, 
+        #     new_agent_text_message("Generating assessment report...")
+        # ) 类似的把消息发给purple的问题
+        logger.info("Generating assessment report...")
         
         report = self.report_generator.generate_report(
             profile=self.analyser.profile,
