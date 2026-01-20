@@ -71,15 +71,40 @@ class SmartHomeEnv:
         self.action_history = []
 
     def get_state(self, key=None):
-        """读取状态"""
-        if key:
-            if key in self.state:
-                return {"status": "success", "key": key, "value": self.state[key]}
-            else:
-                return {"status": "error", "message": f"Key '{key}' not found"}
+        """
+        读取状态
+        """
+        
+        # 1. 处理读取全量状态的情况 (key 为 None)
+        if key is None:
+            return {
+                "status": "success",
+                "state": self.state.copy(),
+                "message": "Full state retrieved",
+                "metadata": {
+                    "operation_object": "environment" 
+                }
+            }
+
+        # 2. 处理指定 Key 读取的情况
+        # 准备 metadata
+        metadata = {
+            "operation_object": key
+        }
+
+        if key in self.state:
+            return {
+                "status": "success",
+                "value": self.state[key],
+                "message": f"Current value of {key} is {self.state[key]}",
+                "metadata": metadata
+            }
         else:
-            # 返回全量状态
-            return {"status": "success", "state": self.state.copy()}
+            return {
+                "status": "error",
+                "message": f"Key '{key}' not found",
+                "metadata": metadata
+            }
 
     def update_state(self, key, value):
         """根据输入操作环境并返回结果"""
