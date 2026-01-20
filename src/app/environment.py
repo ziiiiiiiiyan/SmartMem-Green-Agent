@@ -132,18 +132,22 @@ class SmartHomeEnv:
         
         # 3. 校验 Int 类型 (温度、音量等)
         if key in ["ac_temperature", "music_volume"]:
-            if not isinstance(value, int):
+            try:
+                value = int(value) 
+            except (ValueError, TypeError):
                 return {
                     "status": "error",
-                    "message": "Value must be an integer",
+                    "message": f"Value for {key} must be a valid integer (received: {value})",
                     "metadata": metadata
                 }
+
             if key == "ac_temperature" and not (16 <= value <= 30):
                 return {
                     "status": "error",
                     "message": "Temperature must be between 16 and 30",
                     "metadata": metadata
                 }
+                
             if key == "music_volume" and not (0 <= value <= 10):
                 return {
                     "status": "error",
