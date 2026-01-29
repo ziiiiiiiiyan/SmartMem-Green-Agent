@@ -12,8 +12,9 @@ from green_agent_v2 import AdaptiveGenerator, WeaknessAnalyzer, TurnEvaluator, T
 from green_agent_v2.visualize import ReportGenerator
 from app import SmartHomeEnv
 
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("smartmem_green_agent")
-logger.setLevel(logging.INFO)
+
 
 class EvalRequest(BaseModel):
     """Request format sent by the AgentBeats platform to green agents."""
@@ -70,7 +71,7 @@ class Agent:
         self.test_case_generator = AdaptiveGenerator(use_static=use_static)
         self.env = SmartHomeEnv()
         self.analyser = WeaknessAnalyzer()
-        self.report_generator = ReportGenerator()
+        self.report_generator = ReportGenerator() #TODO: 好像没有必要作为全局变量? 需要用的时候再初始化就行了
         self.round_history = []
         self.all_results: List[TestResult] = []
         self._use_static = use_static
@@ -96,6 +97,7 @@ class Agent:
 
         Use self.messenger.talk_to_agent(message, url) to call other agents.
         """
+        #TODO: 把green agent的评测逻辑搬到green_agent_v2/green_agent.py里
         input_text = get_message_text(message)
 
         # Try to parse as EvalRequest (from AgentBeats platform)
@@ -203,7 +205,12 @@ class Agent:
                         if isinstance(parsed_actions, list) and len(parsed_actions) > 0:
                             env_res: List[Dict] = []
                             for action in parsed_actions:
-                                _res = self.env.update_state(action)
+                                if action['action'] == 'update':
+                                    k, v = action['device_id'], action['value']
+                                    _res = self.env.update_state(key=k, value=v)
+                                elif action['action'] == 'read':
+                                    k = action['device_id']
+                                    _res = self.env.get_state(key=k)
                                 env_res.append(_res)
                             current_input = json.dumps(env_res)
                         
@@ -216,7 +223,7 @@ class Agent:
                     turn_score = turn_res['score']
                     test_case_total_score += turn_score
                     test_case_max_score += 1 # 实际上应该就是turn的数量？
-                    turn_details.append(
+                    turn_details.append( #TODO: 直接放在evaluate里输出
                         {
                             'turn_id': turn_id,
                             'instruction': instruction,
