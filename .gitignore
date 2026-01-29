@@ -12,3 +12,6 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Test data
+src/green_agent/simulator/data_synthesizer/test_data/
