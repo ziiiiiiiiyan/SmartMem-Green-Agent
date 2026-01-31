@@ -6,6 +6,124 @@ Each prompt is designed for a specific device type.
 import json
 
 
+def get_unified_prompt(input_command, history_context=""):
+    """
+    Generate comprehensive natural language conversion prompt for unified synthesizer
+
+    Args:
+        input_command: Dictionary with command parameters
+        history_context: String containing previous commands context (shows recent commands for conversational reference)
+
+    Returns:
+        str: Complete prompt for LLM
+    """
+    prompt = f"""You are a home assistant converting structured smart home control commands into natural, conversational English language.
+
+IMPORTANT - ROLE PLAYING:
+- DEFAULT ROLE: You are the HOMEOWNER speaking to control the smart home system
+- EXCEPTION: ONLY when the action is "send_visitor_msg" with source="visitor", you are a STRANGER/VISITOR speaking
+- Most commands should sound like the owner giving instructions to their home system
+
+HISTORY CONTEXT (for conversational reference):
+{history_context}
+
+Device types and operation guidelines:
+
+[1. Air Conditioner (AC)]
+- CRITICAL: ALWAYS explicitly mention "AC" or "Air conditioner" to avoid ambiguity
+- "update" + power: Power control
+  * power="on": Example outputs - "Turn on the AC", "AC on", "Start the AC"
+  * power="off": Example outputs - "Turn off the AC", "AC off", "Shut down the AC"
+- "update" + mode: Mode switching
+  * mode="cooling": Example outputs - "AC cooling mode", "Switch the AC to cooling"
+  * mode="heating": Example outputs - "AC heating mode", "Change the AC to heating"
+  * mode="dehumidify": Example outputs - "AC dehumidify mode", "Set the AC to dehumidify"
+- "update" + temperature: Temperature adjustment
+  * temperature is a number (16-30): Set AC to this temperature (Celsius)
+  * Example outputs - "Set AC to 26 degrees", "Make the AC 24", "AC temperature up to 28"
+- "update" + fan_speed: Fan speed adjustment
+  * fan_speed="auto": Example outputs - "AC fan to auto", "Set AC fan to auto"
+  * fan_speed="1"/"2"/"3": Example outputs - "AC fan speed 1", "Set AC fan to level 2"
+- "update" + sleep_mode: Sleep mode
+  * sleep_mode="on": Example outputs - "Turn on AC sleep mode", "Enable AC sleep mode"
+  * sleep_mode="off": Example outputs - "Turn off AC sleep mode", "Disable AC sleep mode"
+- "update" + timer: Timer setting
+  * timer is a number (0-10 hours, 0.5 hour increments): AC auto-off after this duration
+  * timer=0 means cancel timer: Example outputs - "Cancel AC timer", "Never mind, no AC timer"
+  * timer=2.0: Example outputs - "Set AC timer for 2 hours", "AC 2-hour timer"
+- "read": Query AC status
+  * Example outputs - "What's the AC status?", "Check the AC settings", "What's the AC temperature?"
+
+[2. Lights]
+- "set_preference" + color + device: Set default color preference for a light
+  * MUST use phrasing like "I prefer", "Set as default from now on" to express long-term preference
+  * Example outputs - "I prefer white color for living room light", "Set bedroom light to warm by default"
+- "update" + note: Adjust lighting based on scenario description (fuzzy command)
+  * note is a scenario description, express as "prepare for ... lighting"
+  * Example outputs for note="reading" - "Prepare reading lights", "Set up reading mode"
+  * Example outputs for note="relaxing" - "Give me relaxing lights", "Set lights for relaxation"
+- "update" + power: Power control
+  * device="Bedroom Light": refer as "bedroom light" or "the bedroom light"
+  * device="Living Room Light": refer as "living room light" or "the living room light"
+  * device="Kitchen Light": refer as "kitchen light"
+  * power="on": Example outputs - "Turn on [device]", "[device] on"
+  * power="off": Example outputs - "Turn off [device]", "[device] off"
+- "update" + color: Direct color specification
+  * Color options: white, red, blue, warm
+  * Example outputs - "Make living room light red", "Change bedroom light to blue"
+- "read": Query light status
+  * Example outputs - "Is [device] on?", "Check [device]", "What color is [device]?"
+
+[3. Speaker]
+- "update" + volume: Volume adjustment
+  * volume is a number 0-10, MUST always specify the exact number
+  * Example outputs - "Volume 5", "Set to 7", "Make it 3"
+  * NEVER use vague terms like "louder", "quieter", "up", "down"
+- "read": Query volume
+  * Example outputs - "What's the volume?", "How loud is it?"
+
+[4. Security]
+- "update" + door_lock: Door lock control
+  * door_lock="open": Example outputs - "Open the door", "Unlock the door"
+  * door_lock="closed": Example outputs - "Close the door", "Lock the door"
+  * If note field contains "owner comes back" or similar: Say "I'm back" or "I'm home"
+  * If note field exists (other scenarios): incorporate it naturally
+- "read": Query door lock state
+  * Example outputs - "Is the door locked?", "Check the door", "What's the door status?"
+- "send_user_msg" + source="owner": Owner leaving message (going out)
+  * msg_content format: "reason+return time"
+  * Example outputs for "supermarket+30 minutes" - "I'm going to the supermarket, back in 30 minutes"
+  * Example outputs for "gym+2 hours" - "Heading to the gym for 2 hours"
+- "send_visitor_msg" + source="visitor": Visitor message (STRANGER/VISITOR speaking)
+  * Start with "Stranger:" then write natural spoken content
+  * Example outputs for msg_content="neighbor borrowing something" - "Stranger: Hi, I'm your neighbor, need to borrow something"
+  * Example outputs for msg_content="courier delivery" - "Stranger: Hello, delivery needs signature"
+
+[5. Daily Chat]
+- "chat": Casual conversation command
+  * topic is a direction, generate a specific conversation question/topic to start a dialogue with the agent
+  * topic="books": Example outputs - "What's 'Strait Gate' about?", "Is 'The Three-Body Problem' good?", "What are Haruki Murakami's novels like?"
+  * topic="life tips": Example outputs - "How to cook a perfect soft-boiled egg?", "How to remove oil stains from clothes quickly?", "How to take care of indoor plants?"
+  * topic="AI knowledge concepts": Example outputs - "What is a large language model?", "What is quantum computing?", "How does blockchain work?"
+  * topic="sports and health": Example outputs - "How much exercise should I do daily?", "How to start running training?", "What should yoga beginners know?"
+
+Conversational guidelines:
+1. Keep it casual and natural, like a real person talking
+2. USE CONTEXT from previous commands: If similar to a previous command, use words like "again", "change to", "actually", "make it"
+   * Example evolution - First: "Turn on the AC" → Later: "Turn off the AC" or "Turn it on again"
+   * Example evolution - First: "Set to 26 degrees" → Later: "Change to 24" or "Actually, make it 28"
+3. Don't stuff too many things into one phrase, keep it simple and natural
+4. For "read" action with multiple targets, use natural conversational flow
+   * Example - "What's the fan speed? Is sleep mode on?" instead of "Query fan speed and sleep mode"
+
+Input command (JSON):
+{json.dumps(input_command, ensure_ascii=False)}
+
+Output ONLY the natural language phrase, nothing else. Be concise and conversational.
+"""
+    return prompt
+
+
 def get_ac_prompt(input_command, history_context=""):
     """
     Generate prompt for AC (Air Conditioner) control command conversion.
