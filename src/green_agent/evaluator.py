@@ -1,280 +1,450 @@
-from typing import List, Dict, Any, Tuple, Optional, Set
-from .base import TestResult, WeaknessProfile, DimensionStats
+"""
+Evaluator Module for Agent Performance Assessment
 
-# --- Constants ---
+This module provides an evaluator to assess agent performance on test cases.
+Each test case contains multiple turns, and each turn includes an instruction
+with expected choices.
+"""
 
-DIMENSIONS = ["precision", "ambiguous", "conflict", "memory", "noise"]
+import os
+import json
+from typing import Dict, List, Any, Optional
+from collections import defaultdict
+from dotenv import load_dotenv
+from openai import OpenAI
 
-DEVICE_CONSTRAINTS = {
-    # Living Room
-    "living_room_light": {"type": "enum", "values": ["on", "off"]},
-    "living_room_color": {"type": "enum", "values": ["white", "red", "blue", "warm"]},
-    # Bedroom
-    "bedroom_light": {"type": "enum", "values": ["on", "off"]},
-    "bedroom_color": {"type": "enum", "values": ["white", "warm", "blue", "red"]},
-    # Climate Control
-    "ac": {"type": "enum", "values": ["on", "off"]},
-    "ac_temperature": {"type": "int", "min": 16, "max": 30},
-    "fan_speed": {"type": "enum", "values": ["off", "low", "medium", "high"]},
-    # Entertainment & Security
-    "music_volume": {"type": "int", "min": 0, "max": 10},
-    "front_door_lock": {"type": "enum", "values": ["locked", "unlocked"]},
-    "kitchen_light": {"type": "enum", "values": ["on", "off"]},
-}
 
-# --- Evaluators ---
+load_dotenv()
 
-class TurnEvaluator:
+
+def get_llm_client():
+    """Get OpenAI client configured from .env"""
+    return OpenAI(
+        api_key=os.getenv("OPENAI_API_KEY"),
+        base_url=os.getenv("OPENAI_BASE_URL")
+    )
+
+
+class Evaluator:
     """
-    Evaluates a single turn (instruction -> action -> state change).
+    Test case evaluator for assessing agent performance in each turn.
+
+    A test case contains multiple turns, each with an instruction and expected_choices.
+
+    Evaluation Logic:
+    1. Evaluate each instruction's action correctness and state correctness
+       1.1 If action matches any option in "expected_choices", action scores (0.5 points)
+           1.1.1 For "read" action: check if returned keys match state keys
+           1.1.2 For "update" action: check if returned result matches complete state (keys and values)
+       1.2 If current simulator state matches "expected_state", state scores (0.5 points)
+       1.3 For "send_user_msg" or "send_visitor_msg" with non-empty expected_choices:
+            use LLM to evaluate if text meaning matches expected content
+       1.4 If command action is not "read", "update", or the special cases in 1.3,
+            no evaluation is triggered
+       1.5 Each evaluable item is worth 1 point total (0.5 for action, 0.5 for state)
+
+    2. Maintain evaluation results for complete test case, including:
+       - Percentage score for each tag
+       - Overall percentage score
+       - Maximum winning streak (consecutive turns with both correct action and state)
+       2.1 eval_turn method returns current turn's score
+       2.2 view_results method returns overall score, per-tag scores, and max streak
+
+    3. reset method initializes evaluator for new test case evaluation
     """
-    
-    def __init__(self, expected_actions: List[Dict[str, Any]], expected_final_state: Dict[str, Any]):
+
+    def __init__(self):
+        """Initialize the evaluator"""
+        self.reset()
+        self.llm_client = None
+        self._init_llm_client()
+
+    def _init_llm_client(self):
+        """Initialize LLM client for text similarity evaluation"""
+        try:
+            self.llm_client = get_llm_client()
+        except Exception as e:
+            print(f"Warning: Failed to initialize LLM client: {e}")
+            self.llm_client = None
+
+    def reset(self) -> None:
         """
+        Reset evaluator state to prepare for a new test case evaluation.
+
+        Clears all previous scores, results, and tracking data.
+        """
+        self.turn_scores: List[float] = []  # Score for each turn
+        self.turn_action_scores: List[float] = []  # Action score for each turn
+        self.turn_state_scores: List[float] = []  # State score for each turn
+        self.turn_tags: List[str] = []  # Tag for each turn (for per-tag analysis)
+
+        # Per-tag score tracking
+        self.tag_scores: Dict[str, List[float]] = defaultdict(list)
+
+        # Winning streak tracking
+        self.current_streak: int = 0
+        self.max_streak: int = 0
+
+    def eval_turn(
+        self,
+        input_command: Dict[str, Any],
+        agent_action: Dict[str, Any],
+        expected_choices: List[List[Dict[str, Any]]],
+        simulator_state: Dict[str, Any],
+        tag: Optional[str] = None
+    ) -> float:
+        """
+        Evaluate agent's action and state for the current turn.
+
         Args:
-            expected_actions: List of expected API calls (e.g., [{"action": "update", ...}]).
-            expected_final_state: Dict of expected state values (e.g., {"light": "on"}).
-        """
-        self.expected_actions = expected_actions
-        self.expected_final_state = expected_final_state
-    
-    def evaluate(self, actual_actions: List[Dict[str, Any]], actual_final_state: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Compares actual execution against expectations.
-        
+            input_command: The user's input command
+                Example: {"action": "read", "targets": ["power", "temperature"]}
+            agent_action: The action taken by the agent
+                Example: {"action": "read", "state": {"power": "on", "temperature": 26}}
+            expected_choices: List of possible valid outcomes
+                Each outcome is a list of action dicts
+                Example: [[{"action": "read", "state": {...}}], [...] ]
+            simulator_state: Current state of the simulator (ground truth)
+                Example: {"power": "on", "temperature": 26}
+            tag: Optional tag for this turn (for per-tag scoring)
+
         Returns:
-            Dict containing score (1 or 0), status boolean, and error list.
+            Tuple[float, float]: (action_score, state_score)
+                - action_score: 0.0 or 0.5 for action correctness
+                - state_score: 0.0 or 0.5 for state correctness
+                - Total: 1.0 for perfect turn
         """
-        errors = [] #TODO: 相比于score - 一个模糊分数 - errors应该更适合用来定位弱点
-        
-        # 1. Sequence Verification
-        # FIXME: 这里只检查了操作数量是否相同, 粒度太粗了? 可以定位到具体漏了什么的
-        if len(actual_actions) != len(self.expected_actions):
-            errors.append(f"Action count mismatch: expected {len(self.expected_actions)}, got {len(actual_actions)}")
+        action_score = 0.0
+        state_score = 0.0
+
+        # Get input command action type
+        input_action_type = input_command.get("action", "")
+
+        # Skip evaluation for non-evaluable action types
+        if input_action_type not in ["read", "update", "send_user_msg", "send_visitor_msg"]:
+            self._record_turn(0.0, 0.0, 0.0, tag)
+            return (0.0, 0.0)
+
+        # Evaluate action correctness (0.5 points)
+        action_score = self._eval_action(input_command, agent_action, expected_choices)
+
+        # Evaluate state correctness (0.5 points) - only for read and update
+        if input_action_type in ["read", "update"]:
+            state_score = self._eval_state(agent_action, simulator_state)
         else:
-            for i, (exp, act) in enumerate(zip(self.expected_actions, actual_actions)):
-                if exp != act:
-                    errors.append(f"Action #{i} mismatch: expected {exp}, got {act}")
+            # For message actions, state is not applicable, give full points if action is correct
+            state_score = 0.5 if action_score > 0 else 0.0
 
-        # If sequence failed, we can return early or continue based on strictness. 
-        # Here we treat sequence failure as score 0.
-        sequence_match = len(errors) == 0
-        if not sequence_match: #TODO: 统一返回结果
-             return self._build_result(0, sequence_match, False, errors, "Sequence mismatch")
+        # Calculate total score for this turn
+        total_score = action_score + state_score
 
-        # 2. State Verification
-        # Only verify keys present in expected_final_state
-        # FIXME: 只检查期望修改的key会遗漏一些错误, 比如误操作了别的设备
-        state_match = True
-        for key, exp_val in self.expected_final_state.items():
-            act_val = actual_final_state.get(key)
-            if act_val != exp_val:
-                errors.append(f"State mismatch [{key}]: expected '{exp_val}', got '{act_val}'")
-                state_match = False
-        
-        score = 1 if state_match else 0
-        message = "Perfect" if score == 1 else "State mismatch"
-        
-        return self._build_result(score, sequence_match, state_match, errors, message)
+        # Record this turn's results
+        self._record_turn(total_score, action_score, state_score, tag)
 
-    def _build_result(self, score: int, seq_match: bool, state_match: bool, errors: List[str], msg: str) -> Dict[str, Any]:
-        """Helper to construct the return dictionary."""
-        # TODO: 参考src/agent.py: L225 直接做出全部需要的结果作为result返回
+        return (action_score, state_score)
+
+    def _eval_action(
+        self,
+        input_command: Dict[str, Any],
+        agent_action: Dict[str, Any],
+        expected_choices: List[List[Dict[str, Any]]]
+    ) -> float:
+        """
+        Evaluate action correctness based on input command type.
+
+        Args:
+            input_command: User's input command
+            agent_action: Action taken by agent
+            expected_choices: List of valid expected outcomes
+
+        Returns:
+            float: Action score (0.0 or 0.5)
+        """
+        if not agent_action or not expected_choices:
+            return 0.0
+
+        input_action_type = input_command.get("action", "")
+
+        # Check if agent action matches any expected choice
+        for expected_outcome in expected_choices:
+            if not expected_outcome:
+                continue
+
+            for expected_action in expected_outcome:
+                if self._actions_match(agent_action, expected_action, input_action_type):
+                    return 0.5
+
+        return 0.0
+
+    def _actions_match(
+        self,
+        agent_action: Dict[str, Any],
+        expected_action: Dict[str, Any],
+        input_action_type: str
+    ) -> bool:
+        """
+        Check if agent action matches expected action based on input command type.
+
+        Args:
+            agent_action: Action from agent
+            expected_action: Expected action from choices
+            input_action_type: Type of input command (read, update, etc.)
+
+        Returns:
+            bool: True if actions match
+        """
+        # For message-based input commands, use LLM evaluation
+        if input_action_type in ["send_user_msg", "send_visitor_msg"]:
+            return self._evaluate_text_similarity(agent_action, expected_action)
+
+        # For read and update actions, check structure
+        if "action" not in agent_action or "action" not in expected_action:
+            return False
+
+        if agent_action["action"] != expected_action["action"]:
+            return False
+
+        # For read: check if keys match
+        if input_action_type == "read":
+            agent_state = agent_action.get("state", {})
+            expected_state = expected_action.get("state", {})
+            return set(agent_state.keys()) == set(expected_state.keys())
+
+        # For update: check if complete state matches (keys and values)
+        if input_action_type == "update":
+            agent_state = agent_action.get("state", {})
+            expected_state = expected_action.get("state", {})
+            return agent_state == expected_state
+
+        return False
+
+    def _eval_state(
+        self,
+        agent_action: Dict[str, Any],
+        simulator_state: Dict[str, Any]
+    ) -> float:
+        """
+        Evaluate state correctness.
+
+        Args:
+            agent_action: Action taken by agent (contains state in agent's response)
+            simulator_state: Ground truth state from simulator
+
+        Returns:
+            float: State score (0.0 or 0.5)
+        """
+        if not simulator_state:
+            return 0.0
+
+        # Extract state from agent action
+        agent_state = agent_action.get("state", {})
+
+        # Check if agent's state matches simulator's state
+        if agent_state == simulator_state:
+            return 0.5
+
+        return 0.0
+
+    def _evaluate_text_similarity(
+        self,
+        agent_action: Dict[str, Any],
+        expected_action: Dict[str, Any]
+    ) -> bool:
+        """
+        Evaluate if two text-based actions have similar meaning using LLM.
+
+        Args:
+            agent_action: Action from agent
+            expected_action: Expected action from choices
+
+        Returns:
+            bool: True if the meanings are similar enough
+        """
+        if not self.llm_client:
+            # Fallback to exact comparison if LLM client not available
+            return agent_action == expected_action
+
+        # Extract text content from actions
+        agent_text = self._extract_text_content(agent_action)
+        expected_text = self._extract_text_content(expected_action)
+
+        if not agent_text or not expected_text:
+            return False
+
+        try:
+            # Use LLM to evaluate similarity
+            prompt = f"""Compare the following two texts and determine if they convey similar meaning.
+
+Text 1 (Agent's response): "{agent_text}"
+Text 2 (Expected response): "{expected_text}"
+
+Consider the semantic meaning, not exact wording. The texts should be considered similar if:
+- They convey the same core information
+- They serve the same purpose
+- Minor wording differences are acceptable
+
+Respond with ONLY "true" or "false" (lowercase)."""
+
+            response = self.llm_client.chat.completions.create(
+                model=os.getenv("MODEL_NAME", "gpt-4o"),
+                messages=[{"role": "user", "content": prompt}],
+                **json.loads(os.getenv("MODEL_GEN_ARGS", "{}"))
+            )
+
+            result = response.choices[0].message.content.strip().lower()
+            return result == "true"
+
+        except Exception as e:
+            print(f"Warning: LLM evaluation failed: {e}, falling back to exact comparison")
+            return agent_action == expected_action
+
+    def _extract_text_content(self, action: Dict[str, Any]) -> str:
+        """
+        Extract text content from an action.
+
+        Args:
+            action: Action dictionary
+
+        Returns:
+            str: Extracted text content
+        """
+        # Try different fields that might contain text
+        if "msg_content" in action:
+            return action["msg_content"]
+        if "state" in action and isinstance(action["state"], dict):
+            if "msg_content" in action["state"]:
+                return action["state"]["msg_content"]
+            if "intercom_reply" in action["state"]:
+                return action["state"]["intercom_reply"]
+        if "note" in action:
+            return action["note"]
+
+        # Fallback: return JSON representation
+        return json.dumps(action, ensure_ascii=False)
+
+    def _record_turn(
+        self,
+        total_score: float,
+        action_score: float,
+        state_score: float,
+        tag: Optional[str]
+    ) -> None:
+        """
+        Record turn results and update tracking metrics.
+
+        Args:
+            total_score: Total score for this turn
+            action_score: Action score for this turn
+            state_score: State score for this turn
+            tag: Tag for this turn
+        """
+        self.turn_scores.append(total_score)
+        self.turn_action_scores.append(action_score)
+        self.turn_state_scores.append(state_score)
+
+        # Record tag
+        if tag:
+            if isinstance(tag, list):
+                tag = tag[0] if tag else "unknown"
+            self.turn_tags.append(tag)
+            self.tag_scores[tag].append(total_score)
+        else:
+            self.turn_tags.append("unknown")
+            self.tag_scores["unknown"].append(total_score)
+
+        # Update winning streak
+        if total_score >= 1.0:  # Both action and state correct
+            self.current_streak += 1
+            self.max_streak = max(self.max_streak, self.current_streak)
+        else:
+            self.current_streak = 0
+
+    def view_results(self) -> Dict[str, Any]:
+        """
+        View overall evaluation results for the complete test case.
+
+        Returns:
+            Dict with:
+                - overall_score: Overall percentage score (0-100)
+                - overall_action_score: Overall action percentage score (0-100)
+                - overall_state_score: Overall state percentage score (0-100)
+                - total_turns: Total number of turns evaluated
+                - per_tag_scores: Dict of percentage scores for each tag
+                - max_streak: Maximum winning streak (consecutive perfect turns)
+        """
+        if not self.turn_scores:
+            return {
+                "overall_score": 0.0,
+                "overall_action_score": 0.0,
+                "overall_state_score": 0.0,
+                "total_turns": 0,
+                "per_tag_scores": {},
+                "max_streak": 0
+            }
+
+        # Calculate overall scores
+        total_turns = len(self.turn_scores)
+        overall_total = sum(self.turn_scores) / total_turns * 100
+        overall_action = sum(self.turn_action_scores) / total_turns * 100
+        overall_state = sum(self.turn_state_scores) / total_turns * 100
+
+        # Calculate per-tag scores
+        per_tag_scores = {}
+        for tag, scores in self.tag_scores.items():
+            if scores:
+                per_tag_scores[tag] = sum(scores) / len(scores) * 100
+
         return {
-            "score": score,
-            "details": { #TODO: 把expected_actions, expected_final_state以及actual_actions放进去
-                "sequence_match": seq_match,
-                "state_match": state_match,
-                "errors": errors
-            },
-            "message": msg
+            "overall_score": round(overall_total, 2),
+            "overall_action_score": round(overall_action, 2),
+            "overall_state_score": round(overall_state, 2),
+            "total_turns": total_turns,
+            "per_tag_scores": {tag: round(score, 2) for tag, score in per_tag_scores.items()},
+            "max_streak": round(self.max_streak / total_turns * 100, 2) if total_turns > 0 else 0.0
         }
 
+    def get_detailed_results(self) -> Dict[str, Any]:
+        """
+        Get detailed results including turn-by-turn breakdown.
 
-class WeaknessAnalyzer:
-    """弱点分析器"""
-    
-    def __init__(self):
-        self.profile = WeaknessProfile()
-        # 初始化各维度统计
-        for dim in DIMENSIONS:
-            self.profile.by_dimension[dim] = DimensionStats()
-        for diff in ['easy', 'medium', 'difficult']:
-            self.profile.by_difficulty[diff] = DimensionStats()
-        for device in DEVICE_CONSTRAINTS.keys():
-            self.profile.by_device[device] = DimensionStats()
-    
-    def analyze(self, results: List[TestResult]) -> WeaknessProfile:
-        """分析测试结果，更新弱点画像"""
-        
-        for result in results:
-            case = result.test_case
-            dimension = case.get('dimension', 'unknown')
-            difficulty = case.get('difficulty', 'unknown')
-            
-            # 更新维度统计
-            if dimension in self.profile.by_dimension:
-                self._update_stats(self.profile.by_dimension[dimension], result)
-            
-            # 更新难度统计
-            if difficulty in self.profile.by_difficulty:
-                self._update_stats(self.profile.by_difficulty[difficulty], result)
-            
-            # 更新设备统计
-            devices_involved = self._extract_devices(case)
-            for device in devices_involved:
-                if device in self.profile.by_device:
-                    self._update_stats(self.profile.by_device[device], result)
-            
-            # 记录失败用例
-            if not result.passed:
-                self.profile.failed_cases.append(result)
-        
-        # 检测能力边界
-        self._detect_boundaries()
-        
-        return self.profile
-    
-    def _update_stats(self, stats: DimensionStats, result: TestResult):
-        """更新统计数据"""
-        stats.total += 1
-        stats.total_score += result.score
-        stats.max_possible_score += result.max_score
-        if result.passed:
-            stats.passed += 1
-        else:
-            stats.failed += 1
-    
-    def _extract_devices(self, case: dict) -> set:
-        """提取涉及的设备"""
-        devices = set()
-        
-        # 从 initial_state
-        for key in case.get('initial_state', {}).keys():
-            devices.add(key)
-        
-        # 从 turns
-        for turn in case.get('turns', []):
-            for action in turn.get('expected_agent_action', []):
-                if 'key' in action:
-                    devices.add(action['key'])
-            for key in turn.get('expected_final_state', {}).keys():
-                devices.add(key)
-        
-        return devices
-    
-    def _detect_boundaries(self):
-        """检测能力边界"""
-        
-        # 对每个维度，找到开始失败的难度
-        for dim in DIMENSIONS:
-            dim_stats = self.profile.by_dimension.get(dim, DimensionStats())
-            
-            if dim_stats.total == 0:
-                continue
-            
-            # 简单判断：如果通过率低于 50%，认为达到边界
-            if dim_stats.pass_rate < 0.5:
-                # 尝试找到具体是哪个难度开始失败
-                # 这里简化处理，实际需要更细致的分析
-                if self.profile.by_difficulty['easy'].pass_rate < 0.5:
-                    self.profile.boundary_found[dim] = 'easy'
-                elif self.profile.by_difficulty['medium'].pass_rate < 0.5:
-                    self.profile.boundary_found[dim] = 'medium'
-                else:
-                    self.profile.boundary_found[dim] = 'difficult'
-    
-    def get_top_weaknesses(self, n: int = 5) -> List[Tuple[str, str, float]]:
-        """获取最弱的 N 个维度/设备组合"""
-        weaknesses = []
-        
-        # 维度弱点
-        for dim, stats in self.profile.by_dimension.items():
-            if stats.total > 0:
-                weaknesses.append(('dimension', dim, stats.weakness_score))
-        
-        # 设备弱点
-        for device, stats in self.profile.by_device.items():
-            if stats.total > 0:
-                weaknesses.append(('device', device, stats.weakness_score))
-        
-        # 按弱点分数排序
-        weaknesses.sort(key=lambda x: x[2], reverse=True)
-        return weaknesses[:n]
+        Returns:
+            Dict with:
+                - summary: Overall summary (same as view_results)
+                - turn_by_turn: List of individual turn results
+                - per_tag_breakdown: Detailed breakdown per tag
+        """
+        summary = self.view_results()
 
-# class AdaptiveEvaluator:
-#     """
-#     Acts as a dynamic score tracker.
-#     It receives turn results from the Examiner, evaluates them, 
-#     and synchronizes global performance metrics in real-time.
-#     """
-    
-#     def __init__(self):
-#         # Internal analyzer to track global stats
-#         self.analyzer = WeaknessAnalyzer()
-#         self.history: List[Dict[str, Any]] = []
-    
-#     def evaluate_test_case(
-#         self, 
-#         actual_actions: List[Dict[str, Any]], 
-#         actual_state: Dict[str, Any],
-#         expected_actions: List[Dict[str, Any]],
-#         expected_state: List[Dict[str, Any]],
-#     ) -> Dict[str, Any]:
-#         """
-#         Evaluates a single turn and updates global stats.
-        
-#         Args:
-#             actual_actions: Actions performed by the agent.
-#             actual_state: Final state after execution.
-#             expected_actions: Expected actions (ground truth).
-#             expected_state: Expected final state (ground truth).
-#             metadata: Context dict, must include 'dimension', 'difficulty'. 
-#                       Can optionally include 'involved_devices'.
-        
-#         Returns:
-#             The evaluation result for this turn.
-#         """
-#         # 1. Evaluate the specific turn
-#         evaluator = TurnEvaluator(expected_actions, expected_final_state)
-#         result = evaluator.evaluate(actual_actions, actual_state)
-#         # result ds:
-#         # {
-#         #     "score": score,
-#         #     "details": {
-#         #         "sequence_match": seq_match,
-#         #         "state_match": state_match,
-#         #         "errors": errors
-#         #     },
-#         #     "message": msg
-#         # }
-        
-#         # 2. Enrich result with metadata for the record
-#         full_record = {
-#             **result,
-#             "index": len(self.history)
-#         }
-#         self.history.append(full_record)
-        
-#         # 3. Synchronize global performance (Update Weakness Analyzer)
-#         # Ensure metadata has involved devices if not provided
-#         if 'involved_devices' not in metadata:
-#             metadata['involved_devices'] = self._extract_devices(expected_actions, expected_final_state)
-            
-#         self.analyzer.update(result, metadata)
-        
-#         return result
+        # Turn-by-turn breakdown
+        turn_by_turn = []
+        for i, (total, action, state, tag) in enumerate(zip(
+            self.turn_scores,
+            self.turn_action_scores,
+            self.turn_state_scores,
+            self.turn_tags
+        ), 1):
+            turn_by_turn.append({
+                "turn": i,
+                "tag": tag,
+                "total_score": total,
+                "action_score": action,
+                "state_score": state,
+                "is_perfect": total >= 1.0
+            })
 
-#     def get_global_profile(self) -> WeaknessProfile:
-#         """Returns the current global weakness profile."""
-#         return self.analyzer.get_profile()
+        # Per-tag detailed breakdown
+        per_tag_breakdown = {}
+        for tag, scores in self.tag_scores.items():
+            perfect_count = sum(1 for s in scores if s >= 1.0)
+            per_tag_breakdown[tag] = {
+                "total_turns": len(scores),
+                "perfect_turns": perfect_count,
+                "average_score": round(sum(scores) / len(scores) * 100, 2) if scores else 0.0,
+                "perfect_rate": round(perfect_count / len(scores) * 100, 2) if scores else 0.0
+            }
 
-#     def _extract_devices(self, actions: List[Dict], state: Dict) -> Set[str]:
-#         """Helper to identify devices involved in this turn."""
-#         devices = set()
-#         for action in actions:
-#             if 'key' in action:
-#                 devices.add(action['key'])
-#         for key in state.keys():
-#             devices.add(key)
-#         return devices
+        return {
+            "summary": summary,
+            "turn_by_turn": turn_by_turn,
+            "per_tag_breakdown": per_tag_breakdown
+        }
