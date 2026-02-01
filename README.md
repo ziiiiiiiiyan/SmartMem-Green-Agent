@@ -1,9 +1,190 @@
-# agentbeats的主要交互逻辑
+# SmartMem Green Agent
+
+## Quick Start
+
+### Prerequisites
+
+- Python 3.10+
+- uv package manager
+- API key for OpenAI-compatible LLM service
+
+### Running the Agents
+
+1. **Start Purple Agent** (port 9011):
+   ```bash
+   cd SmartMem-Purple-Agent
+   uv run src/server.py --port 9011
+   ```
+
+2. **Start Green Agent** (port 9010):
+   ```bash
+   cd SmartMem-Green-Agent
+   uv run src/server.py --port 9010
+   ```
+
+3. **Run evaluation test**:
+   ```bash
+   cd SmartMem-Green-Agent-Leaderboard
+   python test_local.py
+   ```
+
+### Configuration
+
+Set API keys in `.env` files or environment variables:
+
+**Green Agent** (`src/green_agent/.env`):
+```
+OPENAI_API_KEY=your-api-key
+OPENAI_BASE_URL=https://api2.aigcbest.top/v1
+MODEL_NAME=gpt-4o
+```
+
+**Purple Agent** (`src/purple_agent/.env`):
+```
+OPENAI_API_KEY=your-api-key
+OPENAI_BASE_URL=https://api2.aigcbest.top/v1
+MODEL_NAME=qwen2.5-1.5b-instruct
+```
+
+### Test Configuration Options
+
+In `test_local.py` or evaluation requests, you can configure:
+
+```python
+{
+    "config": {
+        "max_test_rounds": 1,        # Number of adaptive test rounds
+        "targeted_per_weakness": 1,  # Test cases per identified weakness
+        "convergence_threshold": 0.05,
+        "weakness_num": 1,
+        "max_turns": 5               # Limit turns for quick testing (optional)
+    }
+}
+```
+
+## Visualization
+
+When evaluation completes, charts are automatically generated in `artifacts/`:
+
+- `capability_radar.png` - Radar chart showing per-category capability scores
+- `category_scores.png` - Bar chart of category performance with pass/fail thresholds
+
+Charts require matplotlib: `pip install matplotlib`
+
+---
+
+## A2A Protocol Message Formats
+
+This section describes the message formats used for communication between the Green Agent (evaluator) and Purple Agent (smart home assistant) via the A2A protocol.
+
+### Overview
+
+The Green Agent sends test instructions to the Purple Agent and evaluates its responses. Communication happens through JSON messages with specific formats.
+
+### Message Types
+
+#### 1. Green → Purple: User Instruction
+
+Plain text instruction sent to the Purple Agent:
+
+```
+Is the bedroom light on?
+```
+
+or
+
+```
+Turn on the living room light.
+```
+
+#### 2. Purple → Green: Response Message
+
+Purple Agent responds with a JSON object:
+
+```json
+{
+  "message_type": "text" | "tool",
+  "message_content": "<content>"
+}
+```
+
+**Text Response** (when Purple responds with natural language):
+```json
+{
+  "message_type": "text",
+  "message_content": "The bedroom light is currently off."
+}
+```
+
+**Tool Response** (when Purple needs to interact with devices):
+```json
+{
+  "message_type": "tool",
+  "message_content": "[{\"device_id\": \"bedroom_light\", \"action\": \"read\"}]"
+}
+```
+
+Note: `message_content` for tool responses is a JSON-encoded string containing an array of tool calls.
+
+#### 3. Green → Purple: Tool Execution Result
+
+After executing tool calls on the simulator, Green sends results back:
+
+```json
+[
+  {
+    "message": {"status": "success", "value": "off", ...},
+    "metadata": {"operation_object": "bedroom_light"}
+  }
+]
+```
+
+**Important**: The `metadata.operation_object` must match the `device_id` from the original tool call so Purple can correlate results.
+
+### Tool Call Format
+
+Each tool call in the `message_content` array has this structure:
+
+```json
+{
+  "device_id": "bedroom_light",
+  "action": "read" | "update",
+  "value": "<optional, for update actions>"
+}
+```
+
+**Available device_ids:**
+- `living_room_light`, `living_room_color`
+- `bedroom_light`, `bedroom_color`
+- `ac`, `ac_temperature`
+- `fan_speed`
+- `music_volume`
+- `front_door_lock`
+- `kitchen_light`
+- `all` (read-only, returns all device states)
+
+**Actions:**
+- `read`: Get current device state
+- `update`: Change device state (requires `value`)
+
+**Values by device type:**
+- Lights/AC Power: `on`, `off`
+- Colors: `white`, `red`, `blue`, `warm`
+- Temperature: `16` to `30` (string)
+- Fan Speed: `off`, `low`, `medium`, `high`
+- Volume: `0` to `10` (string)
+- Lock: `locked`, `unlocked`
+
+---
+
+# 原有文档 (Original Documentation)
+
+## agentbeats的主要交互逻辑
 agentbeats平台把scenario.toml里的参赛者等配置发给green， green开始评估流程，中间状态变化通过update_status更新，最终的评估结果通过add_artifacts提交，这会被更新在leaderboard上（默认是results文件夹里）
 
 green评估过程中通过talk_to_agent和purple交互
 
-# green_agent_v2
+## green_agent_v2
 它继承自原来的green agent文件夹，去除了各种通用设施，保留了核心的试题生成和评估逻辑。
 
 - 各种基础的数据结构定义被统一存放到了base.py中

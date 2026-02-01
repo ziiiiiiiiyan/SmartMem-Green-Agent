@@ -2,6 +2,7 @@ import os
 import json
 from typing import List, Dict, Optional, Any
 import logging
+from pathlib import Path
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -13,11 +14,14 @@ load_dotenv()
 
 logger = logging.getLogger("smartmem_green_agent")
 
+# Get the directory where this module is located
+_MODULE_DIR = Path(__file__).parent
+
 
 class GreenAgent:
     """Green Agent for testing smart home control capabilities"""
 
-    def __init__(self, test_data_path: str = "data/test.json"):
+    def __init__(self, test_data_path: str = None):
         """
         Initialize GreenAgent
 
@@ -37,7 +41,9 @@ class GreenAgent:
         self.model_name = os.getenv("MODEL_NAME", "gpt-4o")
         self.model_gen_args = json.loads(os.getenv("MODEL_GEN_ARGS", "{}"))
 
-        # Load test data
+        # Load test data - use default path relative to module if not specified
+        if test_data_path is None:
+            test_data_path = str(_MODULE_DIR / "data" / "test.json")
         self.test_data_path = test_data_path
         self.test_data: List[Dict[str, Any]] = []
         self._load_test_data()
@@ -72,10 +78,44 @@ class GreenAgent:
         self.test_active: bool = False
 
     def _load_test_data(self):
-        """Load test data from JSON file"""
+        """Load test data from JSON file
+
+        The test.json structure is:
+        {
+            "metadata": {...},
+            "test_cases": [
+                {
+                    "metadata": {...},
+                    "turns": [...]
+                },
+                ...
+            ]
+        }
+
+        We flatten all turns from all test cases into a single list.
+        """
         try:
             with open(self.test_data_path, "r", encoding="utf-8") as f:
-                self.test_data = json.load(f)
+                data = json.load(f)
+
+            # Handle both formats: direct list of turns or nested structure
+            if isinstance(data, list):
+                self.test_data = data
+            elif isinstance(data, dict):
+                if "test_cases" in data:
+                    # Flatten all turns from all test cases
+                    all_turns = []
+                    for test_case in data["test_cases"]:
+                        turns = test_case.get("turns", [])
+                        all_turns.extend(turns)
+                    self.test_data = all_turns
+                elif "turns" in data:
+                    self.test_data = data["turns"]
+                else:
+                    self.test_data = []
+            else:
+                self.test_data = []
+
             logger.info(f"Loaded {len(self.test_data)} turns from {self.test_data_path}")
         except FileNotFoundError:
             logger.warning(f"Test data file not found: {self.test_data_path}")
@@ -146,8 +186,14 @@ class GreenAgent:
         message_content = message.get("message_content", "")
 
         if message_type == "tool":
-            # Forward to simulator
-            return await self._handle_tool_call(message_content)
+            # Forward to simulator - message_content is a JSON string of tool calls
+            tool_calls = json.loads(message_content) if isinstance(message_content, str) else message_content
+            # Handle single tool call or list of tool calls
+            if isinstance(tool_calls, list) and len(tool_calls) > 0:
+                tool_call = tool_calls[0]  # Take the first tool call
+            else:
+                tool_call = tool_calls
+            return await self._handle_tool_call(tool_call)
         elif message_type == "text":
             # Use LLM to determine intent
             return await self._handle_text_message(message_content)
@@ -193,9 +239,12 @@ class GreenAgent:
             self.current_turn_actions.append(tool_call)
 
             # Don't evaluate here - evaluate when turn is complete
+            # Include device_id in response for Purple agent to match results
+            device_id = tool_call.get("device_id", "environment")
             response = {
                 "message_type": "tool_result",
-                "message_content": result
+                "message_content": result,
+                "device_id": device_id
             }
             return (json.dumps(response, ensure_ascii=False), None)
 
