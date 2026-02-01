@@ -17,6 +17,90 @@ logger = logging.getLogger("smartmem_green_agent")
 # Get the directory where this module is located
 _MODULE_DIR = Path(__file__).parent
 
+# Mapping from Purple Agent's device_id (snake_case) to simulator's device names
+DEVICE_ID_TO_NAME = {
+    "living_room_light": "Living Room Light",
+    "living_room_color": "Living Room Light",  # Color is a property of the light
+    "bedroom_light": "Bedroom Light",
+    "bedroom_color": "Bedroom Light",  # Color is a property of the light
+    "kitchen_light": "Kitchen Light",
+    "ac": "AC",
+    "ac_temperature": "AC",  # Temperature is a property of AC
+    "fan_speed": "AC",  # Fan speed is on AC device
+    "music_volume": "Speaker",
+    "front_door_lock": "Security",
+    "all": None  # Special case for reading all devices
+}
+
+# Mapping for parameter names based on device_id
+DEVICE_ID_TO_PARAM = {
+    "living_room_light": "power",
+    "living_room_color": "color",
+    "bedroom_light": "power",
+    "bedroom_color": "color",
+    "kitchen_light": "power",
+    "ac": "power",
+    "ac_temperature": "temperature",
+    "fan_speed": "fan_speed",
+    "music_volume": "volume",
+    "front_door_lock": "door_lock",
+}
+
+# Value translation for specific device_ids
+# Purple Agent value -> Simulator value
+VALUE_TRANSLATION = {
+    "front_door_lock": {
+        "locked": "closed",
+        "unlocked": "open"
+    },
+    "fan_speed": {
+        "off": "auto",  # Map "off" to "auto" for AC fan
+        "low": "1",
+        "medium": "2",
+        "high": "3"
+    }
+}
+
+
+def translate_agent_action_for_eval(agent_action: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Translate Purple Agent's action format to the expected format for evaluation.
+
+    Purple Agent format: {"device_id": "bedroom_light", "action": "read/update", "value": "..."}
+    Expected format: {"action": "read/update", "device": "Bedroom Light", "state": {...}}
+
+    Args:
+        agent_action: Action in Purple Agent's format
+
+    Returns:
+        Action in expected format for evaluation
+    """
+    device_id = agent_action.get("device_id", "")
+    action = agent_action.get("action", "read")
+    value = agent_action.get("value")
+
+    # Map device_id to device name
+    device_name = DEVICE_ID_TO_NAME.get(device_id, device_id)
+
+    # Build translated action
+    translated = {
+        "action": action,
+        "device": device_name
+    }
+
+    # For update actions, build the state dict
+    if action == "update" and value is not None:
+        param_name = DEVICE_ID_TO_PARAM.get(device_id, "power")
+
+        # Translate value if needed
+        translated_value = value
+        if device_id in VALUE_TRANSLATION and value in VALUE_TRANSLATION[device_id]:
+            translated_value = VALUE_TRANSLATION[device_id][value]
+
+        translated["state"] = {param_name: translated_value}
+
+    return translated
+
 
 class GreenAgent:
     """Green Agent for testing smart home control capabilities"""
@@ -184,6 +268,7 @@ class GreenAgent:
 
         message_type = message.get("message_type")
         message_content = message.get("message_content", "")
+        logger.info(f"Processing step - message_type: {message_type}")
 
         if message_type == "tool":
             # Forward to simulator - message_content is a JSON string of tool calls
@@ -196,6 +281,7 @@ class GreenAgent:
             return await self._handle_tool_call(tool_call)
         elif message_type == "text":
             # Use LLM to determine intent
+            logger.info(f"Handling text message: {message_content[:100]}...")
             return await self._handle_text_message(message_content)
         else:
             # Invalid message_type - raise error
@@ -219,14 +305,58 @@ class GreenAgent:
         Handle tool/function call from agent
 
         Args:
-            tool_call: Tool call data
+            tool_call: Tool call data from Purple Agent
+                Format: {"device_id": "bedroom_light", "action": "read/update", "value": "..."}
 
         Returns:
             tuple: (response_content, is_new_test_case)
         """
         try:
-            # Execute command on simulator
-            result = self.simulator.execute(tool_call)
+            # Translate Purple Agent's format to simulator's format
+            device_id = tool_call.get("device_id", "")
+            action = tool_call.get("action", "read")
+            value = tool_call.get("value")
+
+            # Map device_id to simulator device name
+            device_name = DEVICE_ID_TO_NAME.get(device_id)
+
+            if device_id == "all":
+                # Special case: read all devices
+                simulator_command = {
+                    "device": None,
+                    "action": "read_all"
+                }
+                # Get status of all devices
+                all_status = {}
+                for dev_name, device in self.simulator.devices.items():
+                    all_status[dev_name] = device.read()
+                result = {"status": True, "message": "Read all devices", "data": all_status}
+            elif device_name is None:
+                result = {"device": device_id, "status": False, "message": f"Unknown device_id: {device_id}"}
+            else:
+                # Build simulator command
+                if action == "read":
+                    simulator_command = {
+                        "device": device_name,
+                        "action": "read"
+                    }
+                else:  # update
+                    # Map the value to the correct parameter name
+                    param_name = DEVICE_ID_TO_PARAM.get(device_id, "power")
+
+                    # Translate value if needed (e.g., locked -> closed for door lock)
+                    translated_value = value
+                    if device_id in VALUE_TRANSLATION and value in VALUE_TRANSLATION[device_id]:
+                        translated_value = VALUE_TRANSLATION[device_id][value]
+
+                    simulator_command = {
+                        "device": device_name,
+                        "action": "update",
+                        "params": {param_name: translated_value}
+                    }
+
+                # Execute command on simulator
+                result = self.simulator.execute(simulator_command)
 
             # Add to conversation history
             self.conversation_history.append({
@@ -240,7 +370,6 @@ class GreenAgent:
 
             # Don't evaluate here - evaluate when turn is complete
             # Include device_id in response for Purple agent to match results
-            device_id = tool_call.get("device_id", "environment")
             response = {
                 "message_type": "tool_result",
                 "message_content": result,
@@ -288,6 +417,7 @@ class GreenAgent:
 
             # Check if conversation is complete
             intent = await self._determine_conversation_intent(message_content)
+            logger.info(f"Conversation intent for '{message_content[:50]}...': {intent}")
 
             if intent == "complete":
                 # Mark conversation as complete
@@ -339,7 +469,9 @@ class GreenAgent:
 
     async def _determine_conversation_intent(self, message: str) -> str:
         """
-        Use LLM to determine if agent has completed the current task
+        Determine if agent has completed the current task.
+
+        Uses heuristic detection first, then falls back to LLM if needed.
 
         Args:
             message: Agent's message
@@ -347,14 +479,64 @@ class GreenAgent:
         Returns:
             str: "complete" if task is done, "continue" otherwise
         """
-        try:
-            prompt = f"""Analyze the following message from an AI agent and determine if they have completed their current task.
+        # Heuristic detection for common completion patterns
+        message_lower = message.lower().strip()
 
-Agent's message: "{message}"
+        # Patterns that indicate task completion
+        completion_patterns = [
+            # Device state reports
+            "is currently", "is now", "has been", "was set to",
+            "turned on", "turned off", "is on", "is off",
+            # Status confirmations
+            "the light", "the ac", "the fan", "the door", "the speaker",
+            "temperature is", "volume is", "speed is",
+            # Memory recall patterns (offline mode)
+            "i recall", "i remember", "last time we checked",
+            "the last known", "according to my memory",
+            # Confirmation patterns
+            "done", "completed", "finished", "success",
+            # Direct answers
+            "yes", "no", "correct", "that's right",
+        ]
+
+        # Check if message contains completion patterns
+        for pattern in completion_patterns:
+            if pattern in message_lower:
+                logger.info(f"Heuristic detected completion pattern: '{pattern}'")
+                return "complete"
+
+        # If message is a short definitive statement (likely an answer)
+        if len(message) < 200 and not message_lower.endswith("?"):
+            # Check if it's providing information (not asking)
+            info_indicators = ["is", "are", "was", "were", "has", "have", "can", "will"]
+            for indicator in info_indicators:
+                if f" {indicator} " in f" {message_lower} ":
+                    logger.info(f"Heuristic detected informative statement")
+                    return "complete"
+
+        # Fall back to LLM for ambiguous cases
+        try:
+            prompt = f"""Analyze the following message from a smart home AI assistant and determine if they have completed the user's request.
+
+Assistant's message: "{message}"
+
+The assistant is responding to a user command about smart home devices (lights, AC, fan, door lock, speaker, etc.).
 
 Respond with ONLY "complete" or "continue" (lowercase).
-- "complete": The agent has finished the task and is ready for the next one
-- "continue": The agent is still working on the task or needs more information"""
+- "complete": The assistant has provided a definitive answer, status report, or confirmation that the task is done
+- "continue": The assistant is asking a question, requesting clarification, or the task is clearly incomplete
+
+Examples of COMPLETE responses:
+- "The bedroom light is currently off."
+- "I've turned on the living room light."
+- "The AC temperature is set to 24 degrees."
+- "Since the network is down, I recall the light was off."
+
+Examples of CONTINUE responses:
+- "Which light would you like me to turn on?"
+- "I'm checking the device status..."
+- "Could you please clarify which room?"
+"""
 
             response = self.llm_client.chat.completions.create(
                 model=self.model_name,
@@ -363,11 +545,11 @@ Respond with ONLY "complete" or "continue" (lowercase).
             )
 
             result = response.choices[0].message.content.strip().lower()
-            return result if result in ["complete", "continue"] else "continue"
+            return result if result in ["complete", "continue"] else "complete"  # Default to complete
 
         except Exception as e:
             logger.error(f"Error determining intent: {e}")
-            return "continue"
+            return "complete"  # Default to complete on error to avoid infinite loops
 
     async def _generate_multi_round_response(self) -> str:
         """
@@ -431,14 +613,16 @@ Generate a brief, natural response to continue the conversation."""
             # Use the last agent action for evaluation
             if self.current_turn_actions:
                 last_agent_action = self.current_turn_actions[-1]
+                # Translate Purple Agent's action format to expected format for evaluation
+                translated_action = translate_agent_action_for_eval(last_agent_action)
             else:
                 # No actions taken - empty action
-                last_agent_action = {"action": "none"}
+                translated_action = {"action": "none"}
 
             # Evaluate turn
             action_score, state_score = self.evaluator.eval_turn(
                 input_command=input_command,
-                agent_action=last_agent_action,
+                agent_action=translated_action,
                 expected_choices=expected_choices,
                 simulator_state=simulator_state,
                 tag=tag

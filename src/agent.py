@@ -207,6 +207,11 @@ class Agent:
                                 if is_test_complete:
                                     self.green_agent.test_active = False
                                     break
+                                # If we got a new command, use it for the next iteration
+                                if response_content:
+                                    command_text = response_content
+                                    turns_completed += 1
+                                    continue
                         else:
                             # Text response - this is the next command
                             command_text = msg_content
