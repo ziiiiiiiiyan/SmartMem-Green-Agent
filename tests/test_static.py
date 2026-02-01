@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 import json
 import asyncio
 import httpx
+import pytest
 from messenger import send_message
 
 # Static test cases (no LLM generation needed)
@@ -67,6 +68,7 @@ STATIC_TEST_CASES = [
 ]
 
 
+@pytest.mark.asyncio
 async def test_purple_agent():
     """Test Purple Agent with static test cases."""
     

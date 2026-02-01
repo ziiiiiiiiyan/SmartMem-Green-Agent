@@ -9,11 +9,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 import json
 import asyncio
 import httpx
+import pytest
 
 GREEN_AGENT_URL = "http://localhost:9010"
 PURPLE_AGENT_URL = "http://localhost:9011"
 
 
+@pytest.mark.asyncio
 async def test_full_eval():
     """Send an EvalRequest to Green Agent and monitor progress."""
     
